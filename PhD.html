@@ -1,0 +1,800 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, addDoc, updateDoc, deleteDoc, query } from 'firebase/firestore';
+import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { ArrowLeft, Plus, Trash2, Edit, Save, Settings, Eye, BarChart2, Palette, Image as ImageIcon, Video, Type, AlignLeft, AlignCenter, AlignRight, UploadCloud, LogOut, Github, Linkedin, Twitter, Mail, Link as LinkIcon, LayoutTemplate } from 'lucide-react';
+
+// --- Firebase Configuration ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_AUTH_DOMAIN",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_STORAGE_BUCKET",
+    messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+    appId: "YOUR_APP_ID"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// --- App ID Configuration ---
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-phd-bio-app';
+
+// --- Helper Functions ---
+const getDbPath = (path) => `/artifacts/${appId}/public/data/${path}`;
+
+// --- UI Components ---
+
+const ImageUpload = ({ onUpload, currentUrl }) => {
+    const fileInputRef = useRef(null);
+
+    const handleFileChange = (event) => {
+        const file = event.target.files[0];
+        if (file && file.type.startsWith('image/')) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                onUpload(e.target.result);
+            };
+            reader.readAsDataURL(file);
+        } else {
+            console.warn('Please select a valid image file.');
+        }
+    };
+
+    return (
+        <div className="space-y-2">
+            <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="image/*" />
+            <button type="button" onClick={() => fileInputRef.current.click()} className="w-full flex items-center justify-center gap-2 p-3 border-2 border-dashed rounded-md text-gray-500 hover:bg-gray-100 hover:border-gray-400 transition-colors">
+                <UploadCloud size={18} /> <span>Upload from Device</span>
+            </button>
+            {currentUrl && <img src={currentUrl} alt="Preview" className="mt-2 rounded-md max-h-40 w-auto shadow-sm object-contain mx-auto" />}
+        </div>
+    );
+};
+
+const Notification = ({ message, show, onDismiss }) => {
+    useEffect(() => {
+        if (show) {
+            const timer = setTimeout(() => onDismiss(), 3000);
+            return () => clearTimeout(timer);
+        }
+    }, [show, onDismiss]);
+
+    return (
+        <div className={`fixed top-5 right-5 bg-green-500 text-white px-6 py-3 rounded-lg shadow-lg z-50 transition-transform duration-300 ${show ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0'}`}>
+            {message}
+        </div>
+    );
+};
+
+const ConfirmationModal = ({ show, message, onConfirm, onCancel }) => {
+    if (!show) return null;
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
+            <div className="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full m-4">
+                <h3 className="text-lg font-bold mb-4">Confirm Action</h3>
+                <p className="mb-6">{message}</p>
+                <div className="flex justify-end gap-4">
+                    <button onClick={onCancel} className="px-4 py-2 rounded-md bg-gray-200 hover:bg-gray-300">Cancel</button>
+                    <button onClick={onConfirm} className="px-4 py-2 rounded-md bg-red-600 text-white hover:bg-red-700">Confirm</button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const RichTextEditor = ({ content, setContent }) => {
+    const editorRef = useRef(null);
+    const handleContentChange = () => { if (editorRef.current) setContent(editorRef.current.innerHTML); };
+    const execCmd = (command, value = null) => { document.execCommand(command, false, value); editorRef.current.focus(); handleContentChange(); };
+    return (
+        <div className="border rounded-lg bg-white shadow-inner">
+            <div className="flex flex-wrap items-center p-2 border-b bg-gray-50 rounded-t-lg gap-2">
+                <button type="button" onClick={() => execCmd('bold')} className="p-2 hover:bg-gray-200 rounded"><Type size={16} className="font-bold" /></button>
+                <button type="button" onClick={() => execCmd('italic')} className="p-2 hover:bg-gray-200 rounded"><i className="italic">T</i></button>
+                <button type="button" onClick={() => execCmd('underline')} className="p-2 hover:bg-gray-200 rounded"><u className="underline">U</u></button>
+                <button type="button" onClick={() => execCmd('insertUnorderedList')} className="p-2 hover:bg-gray-200 rounded">&#8226;</button>
+                <button type="button" onClick={() => execCmd('insertOrderedList')} className="p-2 hover:bg-gray-200 rounded">1.</button>
+                <button type="button" onClick={() => execCmd('justifyLeft')} className="p-2 hover:bg-gray-200 rounded"><AlignLeft size={16} /></button>
+                <button type="button" onClick={() => execCmd('justifyCenter')} className="p-2 hover:bg-gray-200 rounded"><AlignCenter size={16} /></button>
+                <button type="button" onClick={() => execCmd('justifyRight')} className="p-2 hover:bg-gray-200 rounded"><AlignRight size={16} /></button>
+            </div>
+            <div ref={editorRef} contentEditable onInput={handleContentChange} dangerouslySetInnerHTML={{ __html: content }} className="p-4 h-64 overflow-y-auto focus:outline-none" style={{ minHeight: '250px' }}></div>
+        </div>
+    );
+};
+
+// --- Main App Component ---
+export default function App() {
+    // --- State Management ---
+    const [page, setPage] = useState('home');
+    const [currentSubsectionId, setCurrentSubsectionId] = useState(null);
+    const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
+    const [adminUsername, setAdminUsername] = useState('');
+    const [adminPassword, setAdminPassword] = useState('');
+    const [loginError, setLoginError] = useState('');
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [userId, setUserId] = useState(null);
+
+    // --- Firestore Data State ---
+    const [siteSettings, setSiteSettings] = useState({ siteName: "Biology Researcher", userName: "Your Name", specialization: "PhD Candidate", profilePhotoUrl: "https://placehold.co/200x200/a7f3d0/14532d?text=Profile", backgroundPhotoUrl: "https://placehold.co/1200x400/d1fae5/14532d?text=Lab", socialMedia: [], theme: 'theme-nile-flora', colors: { primary: '#4D7C0F', secondary: '#854D0E', background: '#FEFCE8', text: '#1F2937', lightText: '#A3E635' } });
+    const [aboutMe, setAboutMe] = useState({ content: "", image: { url: '', position: 'right', size: '50' }, video: { url: '', position: 'center', size: '100' } });
+    const [sections, setSections] = useState([]);
+    const [publications, setPublications] = useState([]);
+    const [analytics, setAnalytics] = useState({ totalViews: 0, viewsByPage: {}, viewsByDate: {} });
+
+    // --- Firebase & Auth ---
+    useEffect(() => {
+        const authUnsubscribe = onAuthStateChanged(auth, async (user) => {
+            if (user) { setUserId(user.uid); } 
+            else { try { if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) { await signInWithCustomToken(auth, __initial_auth_token); } else { await signInAnonymously(auth); } } catch (error) { console.error("Auth failed:", error); } }
+            setIsAuthReady(true);
+        });
+        return () => authUnsubscribe();
+    }, []);
+
+    // --- Firestore Data Fetching ---
+    useEffect(() => {
+        if (!isAuthReady) return;
+        const unsubscribes = [
+            onSnapshot(doc(db, getDbPath('siteSettings'), 'main'), (doc) => { if (doc.exists()) setSiteSettings(doc.data()); }),
+            onSnapshot(doc(db, getDbPath('aboutMe'), 'main'), (doc) => { if (doc.exists()) setAboutMe(doc.data()); }),
+            onSnapshot(query(collection(db, getDbPath('sections'))), (snapshot) => setSections(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })))),
+            onSnapshot(query(collection(db, getDbPath('publications'))), (snapshot) => setPublications(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })))),
+            onSnapshot(doc(db, getDbPath('analytics'), 'main'), (doc) => { if (doc.exists()) setAnalytics(doc.data()); }),
+        ];
+        return () => unsubscribes.forEach(unsub => unsub());
+    }, [isAuthReady]);
+
+    // --- Analytics & Navigation ---
+    const trackView = useCallback(async (pageId, title) => {
+        if (!isAuthReady) return;
+        const today = new Date().toISOString().split('T')[0];
+        const analyticsRef = doc(db, getDbPath('analytics'), 'main');
+        try {
+            const currentAnalytics = (await getDoc(analyticsRef)).data() || { totalViews: 0, viewsByPage: {}, viewsByDate: {} };
+            const newAnalytics = {
+                ...currentAnalytics,
+                totalViews: (currentAnalytics.totalViews || 0) + 1,
+                viewsByPage: { ...currentAnalytics.viewsByPage, [pageId]: { count: ((currentAnalytics.viewsByPage?.[pageId]?.count) || 0) + 1, title: title }},
+                viewsByDate: { ...currentAnalytics.viewsByDate, [today]: (currentAnalytics.viewsByDate?.[today] || 0) + 1 }
+            };
+            await setDoc(analyticsRef, newAnalytics, { merge: true });
+        } catch (error) {
+            console.error("Error tracking view:", error);
+        }
+    }, [isAuthReady]);
+
+    useEffect(() => {
+        let viewId = page;
+        let viewTitle = page.charAt(0).toUpperCase() + page.slice(1);
+        if (page === 'subsection' && currentSubsectionId) {
+            const currentSub = sections.flatMap(s => s.subsections || []).find(sub => sub.id === currentSubsectionId);
+            if (currentSub) {
+                viewId = `subsection_${currentSubsectionId}`;
+                viewTitle = currentSub.title;
+            }
+        }
+        trackView(viewId, viewTitle);
+    }, [page, currentSubsectionId, sections, trackView]);
+
+    const navigateTo = (newPage, subId = null) => { setPage(newPage); setCurrentSubsectionId(subId); window.scrollTo(0, 0); };
+    
+    // --- Admin Login/Logout Handlers ---
+    const handleAdminLogin = (e) => { 
+        if (e) e.preventDefault(); 
+        const trimmedUsername = adminUsername.trim();
+        const trimmedPassword = adminPassword.trim();
+        if (trimmedUsername === "lamlom" && trimmedPassword === "1996") {
+            setIsAdminLoggedIn(true); 
+            setLoginError(''); 
+        } else { 
+            setLoginError('Invalid credentials. Please check for extra spaces.'); 
+        } 
+    };
+
+    const handleAdminLogout = () => {
+        setIsAdminLoggedIn(false);
+        setAdminUsername('');
+        setAdminPassword('');
+    };
+
+    // --- Content Display Component ---
+    const ContentDisplay = ({ content, image, video }) => {
+        const imagePosition = image?.position || 'right';
+        const flexDirection = imagePosition === 'top' || imagePosition === 'bottom' ? 'flex-col' : 'md:flex-row';
+        const imageOrder = imagePosition === 'right' || imagePosition === 'bottom' ? 'md:order-last' : '';
+
+        return (
+            <div>
+                <div className={`flex ${flexDirection} gap-8 items-start`}>
+                    {image?.url && (imagePosition === 'left' || imagePosition === 'right') && (
+                        <div className={`flex-shrink-0 ${imageOrder}`} style={{ width: `${image.size || 50}%` }}>
+                            <img src={image.url} alt="Content visual" className="rounded-lg shadow-lg w-full" />
+                        </div>
+                    )}
+                     {image?.url && imagePosition === 'top' && (
+                        <div className="w-full mb-4" style={{ width: `${image.size || 50}%`, margin: '0 auto' }}>
+                            <img src={image.url} alt="Content visual" className="rounded-lg shadow-lg w-full" />
+                        </div>
+                    )}
+                    <div className="prose lg:prose-xl max-w-none flex-grow" dangerouslySetInnerHTML={{ __html: content }}></div>
+                </div>
+                 {image?.url && imagePosition === 'bottom' && (
+                    <div className="w-full mt-4" style={{ width: `${image.size || 50}%`, margin: '2rem auto 0 auto' }}>
+                        <img src={image.url} alt="Content visual" className="rounded-lg shadow-lg w-full" />
+                    </div>
+                )}
+                {video?.url && (
+                    <div className="mt-8 w-full" style={{ width: `${video.size || 100}%`, margin: '2rem auto' }}>
+                        <div className="aspect-w-16 aspect-h-9">
+                            <iframe src={video.url.replace("watch?v=", "embed/")} frameBorder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen className="w-full h-full rounded-lg shadow-lg"></iframe>
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // --- Page Components ---
+    const Header = () => {
+        const theme = siteSettings.theme;
+        let profilePicClasses = "w-32 h-32 md:w-40 md:h-40 border-4 shadow-lg mb-4 object-cover";
+        let headerDivider;
+
+        switch(theme) {
+            case 'theme-scarab-carapace':
+                profilePicClasses += " clip-hexagon";
+                headerDivider = <div className="absolute -bottom-1 w-full h-16 bg-no-repeat bg-cover" style={{ background: `url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M1200 0L0 0 598.97 114.72 1200 0z" class="shape-fill" fill="${siteSettings.colors.background.replace('#', '%23')}"></path></svg>')`}} ></div>
+                break;
+            case 'theme-giza-dusk':
+                profilePicClasses += " rounded-full";
+                 headerDivider = <div className="absolute -bottom-1 w-full h-16 bg-no-repeat bg-cover" style={{ background: `url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,0V120H1200V0L600,120Z" class="shape-fill" fill="${siteSettings.colors.background.replace('#', '%23')}"></path></svg>')`}} ></div>
+                break;
+            case 'theme-luxor-papyrus':
+                 profilePicClasses += " rounded-none";
+                 headerDivider = <div className="absolute bottom-0 w-full h-2" style={{backgroundColor: siteSettings.colors.secondary}}></div>
+                 break;
+            default:
+                profilePicClasses += " rounded-full";
+                headerDivider = <div className="absolute -bottom-1 w-full h-16 bg-no-repeat bg-cover" style={{ background: `url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M985.66,92.83C906.67,72,823.78,31,743.84,14.19c-82.26-17.34-168.06-16.33-250.45.39-57.84,11.73-114,31.07-172,41.86A600.21,600.21,0,0,1,0,27.35V120H1200V95.8C1132.19,118.92,1055.71,111.31,985.66,92.83Z" class="shape-fill" fill="${siteSettings.colors.background.replace('#', '%23')}"></path></svg>')`}} ></div>
+                break;
+        }
+
+        return (
+            <div className="relative text-white text-center pb-16 md:pb-24 flex flex-col justify-center items-center overflow-hidden" style={{ background: `linear-gradient(to bottom, ${siteSettings.colors.primary}, ${siteSettings.colors.secondary})`}}>
+                 <div className="absolute inset-0 bg-black bg-opacity-20"></div>
+                 {headerDivider}
+                <div className="relative z-10 flex flex-col items-center pt-16">
+                    <img src={siteSettings.profilePhotoUrl} alt="Profile" className={profilePicClasses} style={{borderColor: siteSettings.colors.lightText}} />
+                    <h1 className="text-3xl md:text-4xl font-bold tracking-tight">{siteSettings.userName}</h1>
+                    <p className="text-lg md:text-xl font-light">{siteSettings.specialization}</p>
+                </div>
+            </div>
+        );
+    };
+
+    const NavigationBar = () => (
+        <nav className="sticky top-0 z-40 shadow-md" style={{ background: `linear-gradient(to right, ${siteSettings.colors.primary}, ${siteSettings.colors.secondary})`, color: siteSettings.colors.lightText }}>
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div className="flex items-center justify-center h-16 flex-wrap">
+                    <a onClick={() => navigateTo('home')} className="px-3 py-2 rounded-md text-sm font-medium hover:bg-white/20 transition-all cursor-pointer">Home</a>
+                    {sections.map(section => (
+                        <div key={section.id} className="relative group">
+                            <button className="px-3 py-2 rounded-md text-sm font-medium hover:bg-white/20 transition-all cursor-pointer">{section.name}</button>
+                            <div className="absolute left-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 opacity-0 group-hover:opacity-100 transition-opacity duration-200 invisible group-hover:visible z-50">
+                                <div className="py-1">{(section.subsections || []).map(sub => (<a key={sub.id} onClick={() => navigateTo('subsection', sub.id)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">{sub.title}</a>))}</div>
+                            </div>
+                        </div>
+                    ))}
+                    <a onClick={() => navigateTo('publications')} className="px-3 py-2 rounded-md text-sm font-medium hover:bg-white/20 transition-all cursor-pointer">Publications</a>
+                    <a onClick={() => navigateTo('admin')} className="px-3 py-2 rounded-md text-sm font-medium hover:bg-white/20 transition-all cursor-pointer">Admin</a>
+                </div>
+            </div>
+        </nav>
+    );
+
+    const Footer = ({ settings }) => {
+        const SocialIcon = ({ platform }) => {
+            const platformLower = platform.toLowerCase();
+            if (platformLower.includes('linkedin')) return <Linkedin size={20} />;
+            if (platformLower.includes('twitter') || platformLower === 'x') return <Twitter size={20} />;
+            if (platformLower.includes('github')) return <Github size={20} />;
+            if (platformLower.includes('mail') || platformLower.includes('email')) return <Mail size={20} />;
+            return <LinkIcon size={20} />;
+        };
+
+        return (
+            <footer style={{ background: `linear-gradient(to top, ${siteSettings.colors.primary}, ${siteSettings.colors.secondary})`, color: siteSettings.colors.lightText }} className="py-6 px-4 sm:px-6 lg:px-8 mt-auto">
+                <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+                    <p className="text-sm">&copy; {new Date().getFullYear()} {settings.userName}. All Rights Reserved.</p>
+                    {settings.socialMedia && settings.socialMedia.length > 0 && (
+                        <div className="flex gap-5">
+                            {settings.socialMedia.map((social, index) => (
+                                <a key={index} href={social.url} target="_blank" rel="noopener noreferrer" aria-label={social.platform} className="hover:opacity-75 transition-opacity">
+                                    <SocialIcon platform={social.platform} />
+                                </a>
+                            ))}
+                        </div>
+                    )}
+                    <a href="#top" onClick={(e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="text-sm hover:underline">
+                        Back to Top &uarr;
+                    </a>
+                </div>
+            </footer>
+        );
+    };
+
+    const HomePage = () => {
+        let cardClasses = "bg-white/80 backdrop-blur-sm rounded-lg shadow-lg overflow-hidden transform hover:-translate-y-2 transition-transform duration-300 border border-white/20 hover:shadow-xl";
+        if (siteSettings.theme === 'theme-scarab-carapace') {
+            cardClasses = "bg-white/10 backdrop-blur-sm rounded-md shadow-lg overflow-hidden transform hover:-translate-y-2 transition-transform duration-300 border border-purple-400/50 hover:shadow-purple-400/20 hover:shadow-2xl";
+        } else if (siteSettings.theme === 'theme-luxor-papyrus') {
+            cardClasses = "bg-[#fdf6e4] backdrop-blur-sm rounded-none shadow-lg overflow-hidden transform hover:-translate-y-2 transition-transform duration-300 border border-amber-800/20 hover:shadow-2xl shadow-amber-900/20";
+        }
+
+        return (
+            <>
+                <Header />
+                <NavigationBar />
+                <section id="about" className="py-16 px-4 sm:px-6 lg:px-8" style={{ color: siteSettings.colors.text }}>
+                    <div className="max-w-4xl mx-auto">
+                        <h2 className="text-3xl font-bold text-center mb-8" style={{ color: siteSettings.colors.secondary }}>About Me</h2>
+                        <ContentDisplay content={aboutMe.content} image={aboutMe.image} video={aboutMe.video} />
+                    </div>
+                </section>
+                <section className="py-16" style={{ color: siteSettings.colors.text }}>
+                    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                            {sections.map(section => (
+                                <div key={section.id} className={cardClasses}>
+                                    <div className="p-6">
+                                        <h3 className="text-xl font-bold mb-4" style={{ color: siteSettings.colors.primary }}>{section.name}</h3>
+                                        <ul>{(section.subsections || []).map(sub => (<li key={sub.id} className="mb-2"><a onClick={() => navigateTo('subsection', sub.id)} className="cursor-pointer transition-colors duration-200" style={{color: siteSettings.colors.text}}>{sub.title}</a></li>))}</ul>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </section>
+            </>
+        );
+    }
+    
+    const SubsectionPage = () => {
+        const currentSub = sections.flatMap(s => s.subsections || []).find(sub => sub.id === currentSubsectionId);
+        const parentSection = sections.find(s => s.subsections?.some(sub => sub.id === currentSubsectionId));
+        if (!currentSub) return <div><a onClick={() => navigateTo('home')}>Return Home</a></div>;
+        
+        const DefaultLayout = ({children}) => (
+            <div className="flex flex-col md:flex-row max-w-7xl mx-auto my-8 gap-8 px-4 sm:px-6 lg:px-8">
+                <aside className="w-full md:w-1/4 lg:w-1/5 md:order-first">
+                    <div className="sticky top-24 p-4 rounded-lg shadow-md bg-white/80 backdrop-blur-sm border border-white/20">
+                        <h3 className="font-bold text-lg mb-3" style={{ color: siteSettings.colors.secondary }}>In this section:</h3>
+                        <ul>{parentSection?.subsections.map(sub => (<li key={sub.id} className="mb-2"><a onClick={() => navigateTo('subsection', sub.id)} className={`block p-2 rounded-md text-sm cursor-pointer transition-all ${sub.id === currentSubsectionId ? 'font-bold text-white shadow' : 'text-gray-600 hover:bg-gray-200/50'}`} style={{ backgroundColor: sub.id === currentSubsectionId ? siteSettings.colors.primary : 'transparent' }}>{sub.title}</a></li>))}</ul>
+                    </div>
+                </aside>
+                <main className="w-full md:w-3/4 lg:w-4/5">{children}</main>
+            </div>
+        );
+
+        const FullWidthLayout = ({children}) => (
+             <div className="max-w-5xl mx-auto my-8 px-4 sm:px-6 lg:px-8">
+                <div className="bg-white/10 backdrop-blur-sm rounded-lg p-4 mb-8 border border-purple-400/30">
+                     <h3 className="font-bold text-lg mb-3 text-center" style={{ color: siteSettings.colors.lightText }}>In this section:</h3>
+                     <div className="flex justify-center gap-2 flex-wrap">
+                        {parentSection?.subsections.map(sub => (<a key={sub.id} onClick={() => navigateTo('subsection', sub.id)} className={`px-3 py-1 rounded-full text-sm cursor-pointer transition-all ${sub.id === currentSubsectionId ? 'font-bold text-white' : 'hover:bg-white/20'}`} style={{ backgroundColor: sub.id === currentSubsectionId ? siteSettings.colors.primary : 'transparent', color: siteSettings.colors.lightText }}>{sub.title}</a>))}
+                     </div>
+                </div>
+                <main>{children}</main>
+            </div>
+        );
+
+        let LayoutComponent = DefaultLayout;
+        if (siteSettings.theme === 'theme-scarab-carapace' || siteSettings.theme === 'theme-amun-ra-sun') {
+            LayoutComponent = FullWidthLayout;
+        }
+
+        return (
+            <>
+                <Header />
+                <NavigationBar />
+                <LayoutComponent>
+                    <div className="bg-white p-6 md:p-8 rounded-lg shadow-lg">
+                        <h2 className="text-3xl font-bold mb-2" style={{ color: siteSettings.colors.primary }}>I will put something special</h2>
+                        <h1 className="text-4xl font-extrabold mb-6" style={{ color: siteSettings.colors.secondary }}>{currentSub.title}</h1>
+                        <ContentDisplay content={currentSub.content} image={currentSub.image} video={currentSub.video} />
+                    </div>
+                </LayoutComponent>
+            </>
+        );
+    };
+    
+    const PublicationsPage = () => (
+        <>
+            <Header />
+            <NavigationBar />
+            <div className="py-16" style={{ color: siteSettings.colors.text }}>
+                <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+                    <h2 className="text-4xl font-bold text-center mb-12" style={{ color: siteSettings.colors.secondary }}>Publications</h2>
+                    <div className="space-y-12">
+                        {publications.map(pub => (
+                            <div key={pub.id} className="bg-white p-8 rounded-lg shadow-xl border-l-4" style={{ borderColor: siteSettings.colors.primary }}>
+                                <h3 className="text-2xl font-bold mb-2" style={{ color: siteSettings.colors.primary }}>{pub.title}</h3>
+                                <div className="text-sm text-gray-500 mb-4"><span>Published in: <strong>{pub.publisher}</strong></span> | <span>Date: {pub.date}</span></div>
+                                <ContentDisplay content={pub.content} image={pub.image} video={pub.video} />
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        </>
+    );
+
+    // --- Admin Panel ---
+    const AdminPage = () => {
+        const [activeTab, setActiveTab] = useState('templates');
+        const [notification, setNotification] = useState({ show: false, message: '' });
+        const [modal, setModal] = useState({ show: false, message: '', onConfirm: null });
+        const showNotification = (message) => setNotification({ show: true, message });
+        const showModal = (message, onConfirmAction) => setModal({ show: true, message, onConfirm: () => { onConfirmAction(); setModal({ show: false, message: '', onConfirm: null }); }});
+        const handleModalCancel = () => setModal({ show: false, message: '', onConfirm: null });
+        
+        const AdminLogin = () => (
+            <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                <div className="max-w-md w-full bg-white p-8 rounded-lg shadow-lg">
+                    <h2 className="text-2xl font-bold text-center mb-6">Admin Login</h2>
+                    <form onSubmit={handleAdminLogin}>
+                        <div className="mb-4">
+                            <label className="block text-gray-700 mb-2">Username</label>
+                            <input type="text" value={adminUsername} onChange={e => setAdminUsername(e.target.value)} className="w-full p-2 border rounded-md" />
+                        </div>
+                        <div className="mb-6">
+                            <label className="block text-gray-700 mb-2">Password</label>
+                            <input type="password" value={adminPassword} onChange={e => setAdminPassword(e.target.value)} className="w-full p-2 border rounded-md" />
+                        </div>
+                        {loginError && <p className="text-red-500 text-sm mb-4">{loginError}</p>}
+                        <button type="submit" className="w-full text-white py-2 rounded-md transition-colors" style={{ backgroundColor: '#0D9488' }}>Login</button>
+                    </form>
+                </div>
+            </div>
+        );
+        
+        const AdminDashboard = () => (
+            <div className="min-h-screen bg-gray-100 flex flex-col md:flex-row">
+                <nav className="w-full md:w-64 bg-gray-800 text-white flex-shrink-0 p-4 flex flex-col">
+                    <div>
+                        <h2 className="text-xl font-bold mb-8">Admin Panel</h2>
+                        <div className="space-y-2">
+                            <a onClick={() => setActiveTab('templates')} className={`flex items-center gap-3 p-3 rounded-md cursor-pointer hover:bg-gray-700 ${activeTab === 'templates' ? 'bg-gray-900' : ''}`}><LayoutTemplate size={18} /> Templates</a>
+                            <a onClick={() => setActiveTab('settings')} className={`flex items-center gap-3 p-3 rounded-md cursor-pointer hover:bg-gray-700 ${activeTab === 'settings' ? 'bg-gray-900' : ''}`}><Settings size={18} /> Site Settings</a>
+                            <a onClick={() => setActiveTab('about')} className={`flex items-center gap-3 p-3 rounded-md cursor-pointer hover:bg-gray-700 ${activeTab === 'about' ? 'bg-gray-900' : ''}`}><Edit size={18} /> Edit 'About Me'</a>
+                            <a onClick={() => setActiveTab('sections')} className={`flex items-center gap-3 p-3 rounded-md cursor-pointer hover:bg-gray-700 ${activeTab === 'sections' ? 'bg-gray-900' : ''}`}><Edit size={18} /> Edit Sections</a>
+                            <a onClick={() => setActiveTab('publications')} className={`flex items-center gap-3 p-3 rounded-md cursor-pointer hover:bg-gray-700 ${activeTab === 'publications' ? 'bg-gray-900' : ''}`}><Edit size={18} /> Edit Publications</a>
+                            <a onClick={() => setActiveTab('analytics')} className={`flex items-center gap-3 p-3 rounded-md cursor-pointer hover:bg-gray-700 ${activeTab === 'analytics' ? 'bg-gray-900' : ''}`}><BarChart2 size={18} /> Analytics</a>
+                        </div>
+                    </div>
+                    <div className="mt-auto">
+                        <a onClick={() => navigateTo('home')} className="flex items-center gap-3 p-3 rounded-md cursor-pointer hover:bg-gray-700"><Eye size={18} /> View Site</a>
+                        <a onClick={handleAdminLogout} className="flex items-center gap-3 p-3 rounded-md cursor-pointer text-red-400 hover:bg-red-800 hover:text-white"><LogOut size={18} /> Log Out</a>
+                    </div>
+                </nav>
+                <main className="flex-1 p-4 md:p-8 overflow-y-auto relative">
+                    <Notification show={notification.show} message={notification.message} onDismiss={() => setNotification({ show: false, message: '' })} />
+                    <ConfirmationModal show={modal.show} message={modal.message} onConfirm={modal.onConfirm} onCancel={handleModalCancel} />
+                    {activeTab === 'templates' && <AdminTemplates showNotification={showNotification} />}
+                    {activeTab === 'settings' && <AdminSiteSettings showNotification={showNotification} />}
+                    {activeTab === 'about' && <AdminAboutMe showNotification={showNotification} />}
+                    {activeTab === 'sections' && <AdminSections showNotification={showNotification} showModal={showModal} />}
+                    {activeTab === 'publications' && <AdminPublications showNotification={showNotification} showModal={showModal} />}
+                    {activeTab === 'analytics' && <AdminAnalytics />}
+                </main>
+            </div>
+        );
+        return isAdminLoggedIn ? <AdminDashboard /> : <AdminLogin />;
+    };
+
+    const AdminTemplates = ({ showNotification }) => {
+        const templates = { 
+            'theme-nile-flora': { name: 'Nile Delta Flora', colors: { primary: '#4D7C0F', secondary: '#854D0E', background: '#FEFCE8', text: '#1F2937', lightText: '#A3E635' }},
+            'theme-scarab-carapace': { name: 'Scarab Carapace', colors: { primary: '#4f46e5', secondary: '#7c3aed', background: '#1e1b4b', text: '#e0e7ff', lightText: '#a5b4fc' }},
+            'theme-luxor-papyrus': { name: 'Luxor Papyrus', colors: { primary: '#ca8a04', secondary: '#a16207', background: '#fef3c7', text: '#422006', lightText: '#fde047' }},
+            'theme-red-sea-coral': { name: 'Red Sea Coral', colors: { primary: '#db2777', secondary: '#be185d', background: '#fff1f2', text: '#831843', lightText: '#f9a8d4' }},
+            'theme-amun-ra-sun': { name: 'Amun-Ra\'s Sun', colors: { primary: '#f59e0b', secondary: '#0e7490', background: '#0c0a09', text: '#f0f9ff', lightText: '#67e8f9' }},
+            'theme-cellular-hieroglyphs': { name: 'Cellular Hieroglyphs', colors: { primary: '#475569', secondary: '#1e293b', background: '#f1f5f9', text: '#1e293b', lightText: '#94a3b8' }},
+            'theme-giza-dusk': { name: 'Giza Pyramids at Dusk', colors: { primary: '#c026d3', secondary: '#ea580c', background: '#2e1065', text: '#f5d0fe', lightText: '#f0abfc' }},
+        };
+
+        const applyTemplate = async (themeKey) => {
+            const newSettings = { ...siteSettings, theme: themeKey, colors: templates[themeKey].colors };
+            await setDoc(doc(db, getDbPath('siteSettings'), 'main'), newSettings);
+            showNotification(`${templates[themeKey].name} template applied!`);
+        };
+
+        return (
+            <div className="bg-white p-6 rounded-lg shadow-md">
+                <h3 className="text-2xl font-bold mb-2">Site Templates</h3>
+                <p className="text-gray-600 mb-6">Choose a template to instantly change the look and feel of your entire site.</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {Object.entries(templates).map(([key, value]) => (
+                        <div key={key} className={`border-4 rounded-lg p-4 cursor-pointer transition-all ${siteSettings.theme === key ? 'border-blue-500 shadow-xl' : 'border-gray-200 hover:border-blue-300'}`} onClick={() => applyTemplate(key)}>
+                            <h4 className="font-bold text-lg mb-3">{value.name}</h4>
+                            <div className="flex gap-2">
+                                <div className="w-8 h-8 rounded-full" style={{backgroundColor: value.colors.primary}}></div>
+                                <div className="w-8 h-8 rounded-full" style={{backgroundColor: value.colors.secondary}}></div>
+                                <div className="w-8 h-8 rounded-full" style={{backgroundColor: value.colors.background, border: '1px solid #ddd'}}></div>
+                                <div className="w-8 h-8 rounded-full" style={{backgroundColor: value.colors.text}}></div>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+    };
+
+    const AdminSiteSettings = ({ showNotification }) => {
+        const [localSettings, setLocalSettings] = useState(siteSettings);
+        useEffect(() => setLocalSettings(siteSettings), [siteSettings]);
+        const handleSave = async () => { await setDoc(doc(db, getDbPath('siteSettings'), 'main'), localSettings, { merge: true }); showNotification('Settings saved!'); };
+        const handleSocialChange = (index, field, value) => { const newSocials = [...localSettings.socialMedia]; newSocials[index][field] = value; setLocalSettings({...localSettings, socialMedia: newSocials}); };
+        const addSocial = () => setLocalSettings({...localSettings, socialMedia: [...(localSettings.socialMedia || []), {platform: '', url: ''}]});
+        const removeSocial = (index) => setLocalSettings({...localSettings, socialMedia: localSettings.socialMedia.filter((_, i) => i !== index)});
+
+        return (
+            <div className="bg-white p-6 rounded-lg shadow-md">
+                <h3 className="text-2xl font-bold mb-6">General Site Settings</h3>
+                <div className="space-y-6">
+                    <div><label className="block font-medium">Site Name</label><input type="text" value={localSettings.siteName} onChange={e => setLocalSettings({...localSettings, siteName: e.target.value})} className="w-full p-2 border rounded-md" /></div>
+                    <div><label className="block font-medium">Your Name</label><input type="text" value={localSettings.userName} onChange={e => setLocalSettings({...localSettings, userName: e.target.value})} className="w-full p-2 border rounded-md" /></div>
+                    <div><label className="block font-medium">Specialization</label><input type="text" value={localSettings.specialization} onChange={e => setLocalSettings({...localSettings, specialization: e.target.value})} className="w-full p-2 border rounded-md" /></div>
+                    <div><label className="block font-medium">Profile Photo</label><ImageUpload currentUrl={localSettings.profilePhotoUrl} onUpload={(dataUrl) => setLocalSettings({ ...localSettings, profilePhotoUrl: dataUrl })} /></div>
+                    <div><label className="block font-medium">Header Background Photo</label><ImageUpload currentUrl={localSettings.backgroundPhotoUrl} onUpload={(dataUrl) => setLocalSettings({ ...localSettings, backgroundPhotoUrl: dataUrl })} /></div>
+                    <div className="border-t pt-4"><h4 className="font-bold mb-2">Social Media</h4><p className="text-sm text-gray-500 mb-2">These links will be displayed with icons in the site footer.</p>{(localSettings.socialMedia || []).map((social, index) => (<div key={index} className="flex items-center gap-2 mb-2"><input type="text" placeholder="Platform (e.g., LinkedIn)" value={social.platform} onChange={e => handleSocialChange(index, 'platform', e.target.value)} className="w-1/3 p-2 border rounded-md" /><input type="text" placeholder="URL" value={social.url} onChange={e => handleSocialChange(index, 'url', e.target.value)} className="w-2/3 p-2 border rounded-md" /><button onClick={() => removeSocial(index)} className="p-2 text-red-500 hover:bg-red-100 rounded-full"><Trash2 size={18} /></button></div>))}<button onClick={addSocial} className="flex items-center gap-2 text-sm text-blue-600 hover:underline"><Plus size={16} /> Add Social Link</button></div>
+                </div>
+                <button onClick={handleSave} className="mt-6 flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700"><Save size={18} /> Save Settings</button>
+            </div>
+        );
+    };
+
+    const AdminAboutMe = ({ showNotification }) => {
+        const [localAbout, setLocalAbout] = useState(aboutMe);
+        useEffect(() => setLocalAbout(aboutMe), [aboutMe]);
+        const handleSave = async () => { await setDoc(doc(db, getDbPath('aboutMe'), 'main'), localAbout); showNotification('About Me section saved!'); };
+        const handleImageChange = (field, value) => setLocalAbout(prev => ({ ...prev, image: { ...prev.image, [field]: value } }));
+        const handleVideoChange = (field, value) => setLocalAbout(prev => ({ ...prev, video: { ...prev.video, [field]: value } }));
+        return (
+            <div className="bg-white p-6 rounded-lg shadow-md"><h3 className="text-2xl font-bold mb-6">Edit 'About Me' Section</h3><div className="space-y-6"><div><label className="block font-medium mb-2">Content</label><RichTextEditor content={localAbout.content} setContent={(c) => setLocalAbout({...localAbout, content: c})} /></div><div className="grid grid-cols-1 md:grid-cols-2 gap-6 border-t pt-6"><div><h4 className="font-medium mb-2 flex items-center gap-2"><ImageIcon size={18} /> Image Settings</h4><ImageUpload currentUrl={localAbout.image.url} onUpload={(dataUrl) => handleImageChange('url', dataUrl)} /><label className="block text-sm">Position</label><select value={localAbout.image.position} onChange={e => handleImageChange('position', e.target.value)} className="w-full p-2 border rounded-md mb-2"><option value="left">Left</option><option value="right">Right</option><option value="top">Top</option><option value="bottom">Bottom</option></select><label className="block text-sm">Size (%)</label><input type="range" min="10" max="100" value={localAbout.image.size} onChange={e => handleImageChange('size', e.target.value)} className="w-full" /></div><div><h4 className="font-medium mb-2 flex items-center gap-2"><Video size={18} /> Video Settings</h4><label className="block text-sm">YouTube/Vimeo URL</label><input type="text" value={localAbout.video.url} onChange={e => handleVideoChange('url', e.target.value)} className="w-full p-2 border rounded-md mb-2" /><label className="block text-sm">Size (%)</label><input type="range" min="10" max="100" value={localAbout.video.size} onChange={e => handleVideoChange('size', e.target.value)} className="w-full" /></div></div></div><button onClick={handleSave} className="mt-6 flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700"><Save size={18} /> Save About Me</button></div>
+        );
+    };
+
+    const AdminSections = ({ showNotification, showModal }) => {
+        const [editingSectionId, setEditingSectionId] = useState(null);
+        const [editingSubId, setEditingSubId] = useState(null);
+        const [newSectionName, setNewSectionName] = useState('');
+        const [newSubTitles, setNewSubTitles] = useState({});
+        const [currentSubData, setCurrentSubData] = useState(null);
+
+        const addSection = async () => { if (!newSectionName) return; await addDoc(collection(db, getDbPath('sections')), { name: newSectionName, subsections: [] }); setNewSectionName(''); showNotification('Section added!'); };
+        const deleteSection = (id) => showModal('Delete this entire section?', async () => { await deleteDoc(doc(db, getDbPath('sections'), id)); showNotification('Section deleted.'); });
+        const addSubSection = async (sectionId) => { const title = newSubTitles[sectionId]; if (!title) return; const sectionRef = doc(db, getDbPath('sections'), sectionId); const sectionDoc = await getDoc(sectionRef); if (sectionDoc.exists()) { const newSub = { id: `sub_${Date.now()}`, title, content: '<p>New content...</p>', image: { url: '', position: 'right', size: '50' }, video: { url: '', position: 'center', size: '100' } }; await updateDoc(sectionRef, { subsections: [...(sectionDoc.data().subsections || []), newSub] }); setNewSubTitles({...newSubTitles, [sectionId]: ''}); showNotification('Subsection added.'); } };
+        const deleteSubSection = (sectionId, subId) => showModal('Delete this subsection?', async () => { const sectionRef = doc(db, getDbPath('sections'), sectionId); const sectionDoc = await getDoc(sectionRef); if (sectionDoc.exists()) { await updateDoc(sectionRef, { subsections: sectionDoc.data().subsections.filter(s => s.id !== subId) }); showNotification('Subsection deleted.'); } });
+        const startEditSub = (sectionId, subId) => { setEditingSectionId(sectionId); setEditingSubId(subId); setCurrentSubData(sections.find(s => s.id === sectionId)?.subsections.find(s => s.id === subId)); };
+        const saveSubSection = async () => { const sectionRef = doc(db, getDbPath('sections'), editingSectionId); const sectionDoc = await getDoc(sectionRef); if (sectionDoc.exists()) { await updateDoc(sectionRef, { subsections: sectionDoc.data().subsections.map(s => s.id === editingSubId ? currentSubData : s) }); setEditingSubId(null); showNotification('Subsection saved!'); } };
+        
+        if (editingSubId) {
+            return (
+                <div className="bg-white p-6 rounded-lg shadow-md">
+                    <button onClick={() => setEditingSubId(null)} className="flex items-center gap-2 text-sm text-blue-600 mb-4"><ArrowLeft size={16} /> Back</button>
+                    <h3 className="text-xl font-bold mb-4">Editing: {currentSubData.title}</h3>
+                    <div className="space-y-4">
+                        <div><label className="block font-medium">Title</label><input type="text" value={currentSubData.title} onChange={e => setCurrentSubData({...currentSubData, title: e.target.value})} className="w-full p-2 border rounded-md" /></div>
+                        <div><label className="block font-medium mb-2">Content</label><RichTextEditor content={currentSubData.content} setContent={(c) => setCurrentSubData({...currentSubData, content: c})} /></div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 border-t pt-6">
+                            <div>
+                                <h4 className="font-medium mb-2 flex items-center gap-2"><ImageIcon size={18} /> Image Settings</h4>
+                                <ImageUpload currentUrl={currentSubData.image?.url} onUpload={(dataUrl) => setCurrentSubData(prev => ({...prev, image: {...prev.image, url: dataUrl}}))} />
+                                <label className="block text-sm">Position</label>
+                                <select value={currentSubData.image?.position} onChange={e => setCurrentSubData(prev => ({...prev, image: {...prev.image, position: e.target.value}}))} className="w-full p-2 border rounded-md mb-2">
+                                    <option value="left">Left</option>
+                                    <option value="right">Right</option>
+                                    <option value="top">Top</option>
+                                    <option value="bottom">Bottom</option>
+                                </select>
+                                <label className="block text-sm">Size (%)</label>
+                                <input type="range" min="10" max="100" value={currentSubData.image?.size} onChange={e => setCurrentSubData(prev => ({...prev, image: {...prev.image, size: e.target.value}}))} className="w-full" />
+                            </div>
+                            <div>
+                                <h4 className="font-medium mb-2 flex items-center gap-2"><Video size={18} /> Video Settings</h4>
+                                <label className="block text-sm">YouTube/Vimeo URL</label>
+                                <input type="text" value={currentSubData.video?.url} onChange={e => setCurrentSubData(prev => ({...prev, video: {...prev.video, url: e.target.value}}))} className="w-full p-2 border rounded-md mb-2" />
+                                <label className="block text-sm">Size (%)</label>
+                                <input type="range" min="10" max="100" value={currentSubData.video?.size} onChange={e => setCurrentSubData(prev => ({...prev, video: {...prev.video, size: e.target.value}}))} className="w-full" />
+                            </div>
+                        </div>
+                    </div>
+                    <button onClick={saveSubSection} className="mt-6 flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700"><Save size={18} /> Save Subsection</button>
+                </div>
+            );
+        }
+
+        return (
+            <div className="bg-white p-6 rounded-lg shadow-md"><h3 className="text-2xl font-bold mb-6">Manage Sections</h3><div className="flex gap-2 mb-6"><input type="text" value={newSectionName} onChange={e => setNewSectionName(e.target.value)} placeholder="New Section Name" className="flex-grow p-2 border rounded-md" /><button onClick={addSection} className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 flex items-center gap-2"><Plus size={18} /> Add</button></div><div className="space-y-6">{sections.map(section => (<div key={section.id} className="p-4 border rounded-lg bg-gray-50"><div className="flex justify-between items-center mb-4"><h4 className="text-xl font-bold">{section.name}</h4><button onClick={() => deleteSection(section.id)} className="text-red-500 hover:text-red-700"><Trash2 size={18} /></button></div><div className="pl-4 border-l-2 space-y-2">{(section.subsections || []).map(sub => (<div key={sub.id} className="flex justify-between items-center p-2 hover:bg-gray-100 rounded-md"><span>{sub.title}</span><div className="flex gap-2"><button onClick={() => startEditSub(section.id, sub.id)} className="text-blue-500"><Edit size={16} /></button><button onClick={() => deleteSubSection(section.id, sub.id)} className="text-red-500"><Trash2 size={16} /></button></div></div>))}<div className="flex gap-2 mt-4"><input type="text" value={newSubTitles[section.id] || ''} onChange={e => setNewSubTitles({...newSubTitles, [section.id]: e.target.value})} placeholder="New Subsection Title" className="flex-grow p-2 border rounded-md text-sm" /><button onClick={() => addSubSection(section.id)} className="bg-blue-500 text-white px-3 py-1 rounded-md text-sm flex items-center gap-1"><Plus size={14} /> Add</button></div></div></div>))}</div></div>
+        );
+    };
+    
+    const AdminPublications = ({ showNotification, showModal }) => {
+        const [editingPub, setEditingPub] = useState(null);
+        const handleSave = async (pubData) => { if (pubData.id) { await updateDoc(doc(db, getDbPath('publications'), pubData.id), pubData); } else { await addDoc(collection(db, getDbPath('publications')), pubData); } setEditingPub(null); showNotification('Publication saved!'); };
+        const deletePub = (id) => showModal('Delete this publication?', async () => { await deleteDoc(doc(db, getDbPath('publications'), id)); showNotification('Publication deleted.'); });
+        
+        const PubEditor = ({pub, onSave}) => { 
+            const [data, setData] = useState(pub || {title: '', publisher: '', date: '', content: '', image: { url: '', position: 'right', size: '50' }, video: { url: '', position: 'center', size: '100' }});
+            
+            const handleImageChange = (field, value) => setData(prev => ({ ...prev, image: { ...prev.image, [field]: value } }));
+            const handleVideoChange = (field, value) => setData(prev => ({ ...prev, video: { ...prev.video, [field]: value } }));
+
+            return (
+                <div className="p-4 border rounded-lg mt-4 space-y-4 bg-gray-50">
+                    <input value={data.title} onChange={e => setData({...data, title: e.target.value})} placeholder="Title" className="w-full p-2 border rounded"/>
+                    <input value={data.publisher} onChange={e => setData({...data, publisher: e.target.value})} placeholder="Publisher" className="w-full p-2 border rounded"/>
+                    <input type="date" value={data.date} onChange={e => setData({...data, date: e.target.value})} className="w-full p-2 border rounded"/>
+                    <RichTextEditor content={data.content} setContent={c => setData({...data, content: c})} />
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 border-t pt-6">
+                        <div>
+                            <h4 className="font-medium mb-2 flex items-center gap-2"><ImageIcon size={18} /> Image Settings</h4>
+                            <ImageUpload currentUrl={data.image?.url} onUpload={(dataUrl) => handleImageChange('url', dataUrl)} />
+                            <label className="block text-sm">Position</label>
+                            <select value={data.image?.position} onChange={e => handleImageChange('position', e.target.value)} className="w-full p-2 border rounded-md mb-2">
+                                <option value="left">Left</option>
+                                <option value="right">Right</option>
+                                <option value="top">Top</option>
+                                <option value="bottom">Bottom</option>
+                            </select>
+                            <label className="block text-sm">Size (%)</label>
+                            <input type="range" min="10" max="100" value={data.image?.size} onChange={e => handleImageChange('size', e.target.value)} className="w-full" />
+                        </div>
+                        <div>
+                            <h4 className="font-medium mb-2 flex items-center gap-2"><Video size={18} /> Video Settings</h4>
+                            <label className="block text-sm">YouTube/Vimeo URL</label>
+                            <input type="text" value={data.video?.url} onChange={e => handleVideoChange('url', e.target.value)} className="w-full p-2 border rounded-md mb-2" />
+                            <label className="block text-sm">Size (%)</label>
+                            <input type="range" min="10" max="100" value={data.video?.size} onChange={e => handleVideoChange('size', e.target.value)} className="w-full" />
+                        </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                        <button onClick={() => onSave(data)} className="bg-blue-600 text-white px-4 py-2 rounded">Save</button>
+                        <button onClick={() => setEditingPub(null)} className="bg-gray-300 px-4 py-2 rounded">Cancel</button>
+                    </div>
+                </div>
+            ) 
+        };
+
+        return (
+            <div className="bg-white p-6 rounded-lg shadow-md">
+                <h3 className="text-2xl font-bold mb-6">Manage Publications</h3>
+                <button onClick={() => setEditingPub({})} className="bg-green-600 text-white px-4 py-2 rounded-md flex items-center gap-2 mb-4"><Plus size={18} /> Add Publication</button>
+                {editingPub && <PubEditor pub={editingPub} onSave={handleSave} />}
+                {publications.map(pub => (
+                    <div key={pub.id} className="flex justify-between items-center p-3 border rounded-lg mt-2">
+                        <div>
+                            <p className="font-bold">{pub.title}</p>
+                            <p className="text-sm text-gray-500">{pub.publisher} - {pub.date}</p>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={() => setEditingPub(pub)} className="text-blue-500"><Edit size={16}/></button>
+                            <button onClick={() => deletePub(pub.id)} className="text-red-500"><Trash2 size={16}/></button>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        );
+    };
+
+    const AdminAnalytics = () => {
+        const pageViewData = Object.entries(analytics.viewsByPage || {}).map(([id, data]) => ({ name: data.title, views: data.count }));
+        const dateViewData = Object.entries(analytics.viewsByDate || {}).sort((a,b) => new Date(a[0]) - new Date(b[0])).map(([date, count]) => ({ date, views: count }));
+        const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#AF19FF'];
+
+        return (
+            <div className="bg-white p-6 rounded-lg shadow-md">
+                <h3 className="text-2xl font-bold mb-6">Site Analytics</h3>
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div className="bg-green-100 text-green-800 p-6 rounded-lg text-center flex flex-col justify-center">
+                        <p className="text-lg font-medium">Total Site Views</p>
+                        <p className="text-5xl font-bold">{analytics.totalViews || 0}</p>
+                    </div>
+                    <div className="lg:col-span-2 p-6 border rounded-lg">
+                        <h4 className="font-bold mb-4 text-center">Views by Date</h4>
+                        <ResponsiveContainer width="100%" height={300}>
+                            <BarChart data={dateViewData}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="date" />
+                                <YAxis />
+                                <Tooltip />
+                                <Legend />
+                                <Bar dataKey="views" fill={siteSettings.colors.primary} />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                    <div className="lg:col-span-3 p-6 border rounded-lg">
+                         <h4 className="font-bold mb-4 text-center">Views by Page/Section</h4>
+                         <ResponsiveContainer width="100%" height={400}>
+                            <PieChart>
+                                <Pie data={pageViewData} dataKey="views" nameKey="name" cx="50%" cy="50%" outerRadius={150} label>
+                                    {pageViewData.map((entry, index) => (
+                                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                                    ))}
+                                </Pie>
+                                <Tooltip />
+                                <Legend />
+                            </PieChart>
+                         </ResponsiveContainer>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    // --- Main Render Logic ---
+    const renderPage = () => {
+        const publicPages = ['home', 'subsection', 'publications'];
+        const currentPage = renderPageContent();
+        
+        const hexToRgba = (hex, alpha) => {
+            if (!hex || hex.length < 7) return `rgba(255, 255, 255, ${alpha})`;
+            const r = parseInt(hex.slice(1, 3), 16);
+            const g = parseInt(hex.slice(3, 5), 16);
+            const b = parseInt(hex.slice(5, 7), 16);
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        };
+        
+        let backgroundStyle = {
+            backgroundColor: siteSettings.colors.background,
+        };
+
+        if (siteSettings.theme === 'theme-luxor-papyrus') {
+            backgroundStyle.backgroundImage = `url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><g fill-rule="evenodd"><g fill="%239C92AC" fill-opacity="0.05"><path opacity=".5" d="M96 95h4v1h-4v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9zm-1 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10-10h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm-9-10v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10-10h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm-9-10v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10-10h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm-9-10v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10-10h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm-9-10v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9z"/></g></g></svg>')`;
+        } else if (siteSettings.theme !== 'theme-cellular-hieroglyphs') {
+             backgroundStyle.backgroundImage = `
+                radial-gradient(${hexToRgba(siteSettings.colors.lightText, 0.1)} 1px, transparent 1px),
+                radial-gradient(${hexToRgba(siteSettings.colors.lightText, 0.1)} 1px, ${siteSettings.colors.background} 1px)
+            `;
+            backgroundStyle.backgroundSize = '40px 40px';
+            backgroundStyle.backgroundPosition = '0 0, 20px 20px';
+        }
+
+        return (
+             <div className="flex flex-col min-h-screen" style={publicPages.includes(page) ? backgroundStyle : {backgroundColor: '#f1f5f9'}}>
+                <div className="flex-grow">
+                    {currentPage}
+                </div>
+                {publicPages.includes(page) && <Footer settings={siteSettings} />}
+            </div>
+        );
+    };
+
+    const renderPageContent = () => {
+        switch (page) {
+            case 'home': return <HomePage />;
+            case 'subsection': return <SubsectionPage />;
+            case 'publications': return <PublicationsPage />;
+            case 'admin': return <AdminPage />;
+            default: return <HomePage />;
+        }
+    };
+
+    return (
+        <>
+            <style>{`
+                .clip-hexagon {
+                    clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+                }
+            `}</style>
+            <div className={`${siteSettings.theme} font-sans`}>{renderPage()}</div>
+        </>
+    );
+}
